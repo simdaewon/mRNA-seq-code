@@ -1,0 +1,87 @@
+library(ComplexHeatmap)
+library(circlize)
+
+
+Early_neural <- c("DACH1", "DBX2", "NES", "OTX1", "OTX2", "POU3F1", "SIX3", "SOX2", "SOX1", "TLX1", "ZBTB16")
+Forebrain <- c("FOXG1")
+Pallium <- c("EOMES", "EMX2", "EMX1", "NEUROG1", "NEUROG2","NGN2", "NR2F1", "PAX6", "TBR1","BCL11B")
+Glutamatergic <- c("SLC17A6","SLC17A7")
+Subpallium <- c("ASCL1", "DLX1", "DLX2", "DLX5", "DLX6", "GSX1", "GSX2", "NKX2-1", "SP8")
+LGE <- c("ALDH1A3", "BCL11B", "EBF1", "ETV1", "FOXP1", "FOXP2", "GPR6", "IKZF1", "IKZF2", "ISL1", "MEIS2", "RARB", "ZNF503")
+GABAergic <- c("CALB2", "GAD2", "LHX1", "NPY", "PVALB", "SST")
+Medium_spiny_neurons <- c("ADORA2A", "ARPP21", "CALB1", "DRD1", "DRD2", "GPR88", "OPRM1", "PENK", "PPP1R1B", "TAC1")
+MGE <- c("GLI1", "LHX6", "NKX6-2", "NR2F2")
+Midbrain <- c("CHRM4", "LMX1B", "NR4A2", "PAX2", "TH")
+Hindbrain <- c("HOXB4", "HOXB9")
+Spinal_cord <- c("CHAT", "FOXA2", "MNX1")
+Pan_Neuronal_marker <- c("CDH2", "DCX", "MAP2", "NCAM1", "RBFOX3", "TUBB3")
+Glial_markers <- c("AIF1", "CNP", "GFAP", "OLIG1", "OLIG2", "S100B")
+
+Our <- read.delim("data/human_rawcounts.txt")
+Our_cleaned <- Our %>%
+  distinct(Gene_ID, .keep_all = TRUE) %>%
+  filter(!is.na(Gene_ID))
+rownames(Our_cleaned) <- Our_cleaned$Gene_ID
+
+count_matrix <- as.matrix(Our_cleaned[, 5:ncol(Our_cleaned)])
+
+
+cpm_matrix <- apply(count_matrix, 2, function(x) (x / sum(x)) * 1000000)
+
+marker_list <- list(
+  Early_neural = Early_neural, Forebrain = Forebrain, Pallium = Pallium, 
+  Glutamatergic = Glutamatergic, Subpallium = Subpallium, LGE = LGE, 
+  GABAergic = GABAergic, MSN = Medium_spiny_neurons, MGE = MGE, 
+  Midbrain = Midbrain, Hindbrain = Hindbrain, Spinal_cord = Spinal_cord, 
+  Pan_Neuronal = Pan_Neuronal_marker, Glial = Glial_markers)
+
+all_markers <- unlist(marker_list)
+marker_groups <- rep(names(marker_list), sapply(marker_list, length))
+
+present_idx <- all_markers %in% rownames(cpm_matrix)
+valid_markers <- all_markers[present_idx]
+valid_groups <- marker_groups[present_idx]
+
+plot_data <- cpm_matrix[valid_markers, ]
+keep_genes <- rowSums(plot_data) > 0
+final_plot_data <- plot_data[keep_genes, ]
+final_groups <- valid_groups[keep_genes]
+final_markers <- valid_markers[keep_genes]
+
+log_data <- log2(final_plot_data + 1)
+log_data_t <- t(log_data)
+
+
+final_groups_factor <- factor(final_groups, levels = names(marker_list))
+
+
+col_ha = columnAnnotation(
+  Group = final_groups_factor,
+  col = list(Group = setNames(rainbow(length(marker_list)), names(marker_list))),
+  show_annotation_name = FALSE)
+
+log_data_t <- log_data_t[, final_markers]
+
+heatmap_color <- colorRamp2(c(0, 5, 10), c("green", "black", "red"))
+
+
+n_genes <- ncol(log_data_t)
+n_samples <- nrow(log_data_t)
+
+png(filename = "figure/brain_region_marker.png", width = 3000, height = 400, res = 150)
+Heatmap(log_data_t, 
+        name = "log2(CPM+1)", 
+        top_annotation = col_ha,
+        column_split = final_groups_factor,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_column_names = TRUE,
+        column_names_rot = 45,        
+        show_row_names = TRUE,
+        column_names_gp = gpar(fontsize = 8),
+        row_names_gp = gpar(fontsize = 10),
+        column_title = "Marker Gene Expression (Non-scaled)",
+        col = heatmap_color,
+        width = unit(n_genes * 15, "pt"),
+        height = unit(n_samples * 15, "pt"))
+dev.off()
