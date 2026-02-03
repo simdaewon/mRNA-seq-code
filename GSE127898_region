@@ -1,0 +1,235 @@
+library(GEOquery)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(biomaRt)
+library(ComplexHeatmap)
+library(circlize)
+library(pheatmap)
+library(RColorBrewer)
+
+getGEOSuppFiles("GSE127898")
+list.files("GSE127898")
+
+file_path <- "GSE127898/GSE127898_human.csv.gz"
+
+human_data <- read_csv(file_path)
+
+
+dim(human_data)
+head(human_data[, 1:5])
+
+gse <- getGEO("GSE127898", destdir = ".", getGPL = FALSE)
+
+metadata_all <- pData(gse[[1]])
+
+human_metadata <- metadata_all[metadata_all$organism_ch1 == "Homo sapiens", ]
+
+head(human_metadata[, "title"])
+
+sample <- human_metadata %>%
+  extract(title, 
+          into = c("Sample_ID", "Region"), 
+          regex = "([^:]+):\\s*\\d+\\s+(.*)",
+          remove = FALSE)
+
+
+#write.csv(sampleinfo,"sampleinfo.csv")
+
+sampleinfo <- read.csv("GSE127898/sampleinfo.csv")
+
+human_data
+
+gene_column_name <- colnames(human_data)
+
+common_samples <- intersect(sampleinfo$Sample_ID, colnames(human_data))
+
+human_data_filtered <- human_data %>%
+  dplyr::select(all_of(gene_column_name), all_of(common_samples))
+
+human_df <- as.data.frame(human_data_filtered)
+
+rownames(human_df) <- human_df$...1
+
+human_df <- human_df[, -1]
+
+
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+gene_map <- getBM(attributes = c("ensembl_gene_id", "external_gene_name"),
+                  filters = "ensembl_gene_id",
+                  values = rownames(human_df),
+                  mart = ensembl)
+
+human_df$ensembl_gene_id <- rownames(human_df)
+
+human_df_with_symbol <- human_df %>%
+  inner_join(gene_map, by = "ensembl_gene_id") %>%
+  filter(external_gene_name != "") %>%
+  distinct(external_gene_name, .keep_all = TRUE)
+
+
+rownames(human_df_with_symbol) <- human_df_with_symbol$external_gene_name
+
+human_df_final <- human_df_with_symbol %>% 
+  dplyr::select(-ensembl_gene_id, -external_gene_name)
+
+
+Our <- read.delim("data/human_rawcounts.txt")
+rownames(Our) <- Our$Gene_ID
+
+counts <- Our[, 5:7]
+
+gene_lengths_kb <- (Our$end - Our$start) / 1000
+
+rpk <- counts / gene_lengths_kb
+
+tpm_matrix <- t(t(rpk) / colSums(rpk)) * 1e6
+
+Our_tpm <- as.data.frame(tpm_matrix)
+rownames(Our_tpm) <- Our$Gene_ID
+colnames(Our_tpm) <- colnames(Our)[5:7]
+
+print(head(Our_tpm))
+colSums(Our_tpm)
+
+
+
+common_genes <- intersect(rownames(Our_tpm), rownames(human_df_final))
+
+combined_data <- cbind(Our_tpm[common_genes, ], human_df_final[common_genes, ])
+
+
+log_tpm <- log2(combined_data + 1)
+
+
+common_samples <- intersect(colnames(log_tpm), sampleinfo$Sample_ID)
+
+final_log_tpm <- log_tpm[, common_samples]
+
+setdiff(colnames(final_log_tpm), sampleinfo$Sample_ID)
+
+
+group_means <- final_log_tpm %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(Sample_ID = rownames(.)) %>%
+  left_join(sampleinfo, by = "Sample_ID") %>%
+  group_by(Group) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>%
+  as.data.frame()
+
+
+rownames(group_means) <- group_means$Group
+group_means_matrix <- t(group_means[,-1])
+
+
+
+Dorsal_Telencephalon <- c("TBR1", "SATB2", "NEUROD6", "MEF2C", "SLC17A7","EMX1","KCNV1","FEZF2","NEUROD2",
+                          "PRDM8","CYP26A1","TSHZ3","SLA","NR4A2","KLHL1","ADRA2A","SLN")
+
+Ventral_Telencephalon <- c("PDYN", "SIX3", "RXRG", "DRD2","TAC1","DLX6","GPR6","PBX3","ISL1","FAM40B",
+                           "GPR88","DLX5","NKX2-1","DRD1","POU3F4","RARB","SERTAD4","ZNF503","NTN1")
+
+Thalamus <- c("TCF7L2","RGS16","GBX2","LHX9","NTNG1","OTX2","SHOX2","RGS8","CPNE9","ZIC4","CPNE7",
+              "KITLG","SOX14")
+
+HIP <- c("NTS","FOXJ1","TNFAIP8L3","MSTN","NRP1")
+
+Cerebellum <- c("CBLN1","ZIC1","PCP2","ZIC4","GABRA6","BARHL1","EN2","ZIC2","MAB21L1","GRM4","TLX3",
+                "FAT2","CDH15","CA8","LCAT","TIMP4","BARHL2","LHX1","CALB1")
+
+
+marker_list <- list(
+  Dorsal_Tel = Dorsal_Telencephalon,
+  Ventral_Tel = Ventral_Telencephalon,
+  Thalamus = Thalamus,
+  HIP = HIP,
+  Cerebellum = Cerebellum)
+
+all_markers <- unlist(marker_list)
+marker_groups <- rep(names(marker_list), sapply(marker_list, length))
+
+present_idx <- all_markers %in% rownames(group_means_matrix)
+valid_markers <- all_markers[present_idx]
+valid_groups <- marker_groups[present_idx]
+
+plot_data <- group_means_matrix[valid_markers, ]
+
+plot_data_t <- t(plot_data)
+
+plot_data_z <- scale(plot_data_t)
+col_fun_z = colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+
+col_ha <-  HeatmapAnnotation(
+  Marker_Group = factor(valid_groups, levels = names(marker_list)),
+  col = list(Marker_Group = setNames(brewer.pal(length(marker_list), "Set1"), names(marker_list))),
+  show_annotation_name = TRUE)
+
+
+Heatmap(plot_data_z,
+        name = "Z-score",
+        top_annotation = col_ha,
+        column_split = factor(valid_groups, levels = names(marker_list)),
+        column_title = "Marker Gene Groups",
+        rect_gp = gpar(col = "white", lwd = 0.5), 
+        cluster_columns = FALSE,
+        cluster_rows = TRUE, 
+        show_column_names = TRUE,
+        column_names_rot = 45,
+        column_names_gp = gpar(fontsize = 8),
+        row_names_gp = gpar(fontsize = 10),
+        col = col_fun_z)
+
+##########################################################################################################################
+library(preprocessCore)
+
+combined_matrix <- as.matrix(combined_data)
+
+norm_matrix <- normalize.quantiles(combined_matrix)
+
+
+rownames(norm_matrix) <- rownames(combined_matrix)
+colnames(norm_matrix) <- colnames(combined_matrix)
+
+
+log_tpm_norm <- log2(norm_matrix + 1)
+
+group_means_norm <- log_tpm_norm %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(Sample_ID = rownames(.)) %>%
+  left_join(sampleinfo, by = "Sample_ID") %>%
+  filter(!is.na(Group)) %>%
+  group_by(Group) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>%
+  as.data.frame()
+
+rownames(group_means_norm) <- group_means_norm$Group
+group_means_matrix_norm <- t(group_means_norm[,-1])
+
+plot_data_norm <- group_means_matrix_norm[valid_markers, ]
+plot_data_z_norm <- scale(t(plot_data_norm))
+
+row_groups <- ifelse(rownames(plot_data_z_norm) == "TP_NPCs", "User_Data", "Reference")
+row_groups <- factor(row_groups, levels = c("User_Data", "Reference"))
+
+
+png(filename = "figure/brain_region_marker_GSE127898.png", width = 3000, height = 400, res = 150)
+Heatmap(plot_data_z_norm,
+        name = "Z-score (QN)",
+        row_split = row_groups,
+        row_title = c("Our", "Reference"),
+        row_gap = unit(5, "mm"),
+        cluster_rows = FALSE,
+        show_row_names = TRUE,
+        row_names_gp = gpar(fontsize = 10, fontface = "bold"),
+        top_annotation = col_ha,
+        column_split = factor(valid_groups, levels = names(marker_list)),
+        column_title = "Marker Gene Groups (Quantile Normalized)",
+        cluster_columns = FALSE,
+        show_column_names = TRUE,
+        column_names_rot = 45,
+        column_names_gp = gpar(fontsize = 8),
+        rect_gp = gpar(col = "white", lwd = 0.5), 
+        col = col_fun_z)
+dev.off()
