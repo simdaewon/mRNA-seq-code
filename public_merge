@@ -1,0 +1,419 @@
+library(biomaRt)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+#raw counts data processing -> TPM
+
+Our <- read.delim("data/human_rawcounts.txt")
+rownames(Our) <- Our$Gene_ID
+
+counts <- Our[, 5:7]
+
+gene_lengths_kb <- (Our$end - Our$start) / 1000
+
+rpk <- counts / gene_lengths_kb
+
+tpm_matrix <- t(t(rpk) / colSums(rpk)) * 1e6
+
+Our_tpm <- as.data.frame(tpm_matrix)
+rownames(Our_tpm) <- Our$Gene_ID
+colnames(Our_tpm) <- colnames(Our)[5:7]
+
+print(head(Our_tpm))
+colSums(Our_tpm)
+
+#######################################################################################################################
+GSE67835 <- read.csv("GSE67835/GSE67835_merged_counts.csv", row.names = 1) # total gene: 22088
+head(GSE67835[1:5])
+nrow(GSE67835) #22088
+ncol(GSE67835) #466
+sample_sums <- colSums(GSE67835)
+
+summary(sample_sums)
+
+plot(sample_sums, type = "l", col = "firebrick",
+     main = "GSE67835: Total Counts per Sample",
+     xlab = "Sample Index", ylab = "Total Counts")
+abline(h = mean(sample_sums), col = "blue", lty = 2)
+
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes <- rownames(GSE67835)
+gene_info <- getBM(attributes = c("external_gene_name", "start_position", "end_position"),
+                   filters = "external_gene_name",
+                   values = genes,
+                   mart = mart)
+
+gene_info$length <- abs(gene_info$end_position - gene_info$start_position)
+
+final_lengths <- gene_info %>%
+  group_by(external_gene_name) %>%
+  summarize(mean_len = mean(length))
+
+
+#biomaRt DB에 정보가 있으며 공통된 유전자에 대해서만 데이터 추출
+common_genes <- intersect(rownames(GSE67835), final_lengths$external_gene_name)
+length(common_genes) # total 18478
+
+counts_sub <- GSE67835[common_genes, ]
+lengths_sub <- final_lengths %>% filter(external_gene_name %in% common_genes)
+
+
+lengths_sub <- lengths_sub[match(common_genes, lengths_sub$external_gene_name), ]
+gene_lengths_kb <- lengths_sub$mean_len / 1000
+
+
+rpk <- counts_sub / gene_lengths_kb
+
+GSE67835_tpm <- t(t(rpk) / colSums(rpk)) * 1e6
+GSE67835_tpm <- as.data.frame(GSE67835_tpm)
+
+print(head(GSE67835_tpm[, 1:5]))
+
+colSums(GSE67835_tpm)[1:5]
+
+####################################################################################################################################
+
+GSE85908 <- read.csv(file = "GSE85908/GSE85908_TPM_matrix.csv", row.names = 1)
+ncol(GSE85908)
+ens_ids <- rownames(GSE85908)
+
+gene_map <- getBM(attributes = c("ensembl_gene_id", "external_gene_name"),
+                  filters = "ensembl_gene_id",
+                  values = ens_ids,
+                  mart = mart)
+
+gene_map <- gene_map[gene_map$external_gene_name != "", ]
+gene_map <- gene_map[!duplicated(gene_map$ensembl_gene_id), ]
+
+common_ids <- intersect(rownames(GSE85908), gene_map$ensembl_gene_id)
+GSE85908_sub <- GSE85908[common_ids, ]
+
+new_names <- gene_map$external_gene_name[match(common_ids, gene_map$ensembl_gene_id)]
+
+GSE85908_df <- as.data.frame(GSE85908_sub)
+GSE85908_df$ensembl_gene_id <- common_ids
+
+
+GSE85908_with_symbol <- GSE85908_df %>%
+  inner_join(gene_map, by = "ensembl_gene_id") %>%
+  dplyr::select(-ensembl_gene_id)
+
+
+GSE85908_tpm <- GSE85908_with_symbol %>%
+  group_by(external_gene_name) %>%
+  summarise(across(everything(), mean, na.rm = TRUE)) %>%
+  column_to_rownames("external_gene_name")
+
+
+print(head(GSE85908_tpm[1:5, 1:5]))
+
+####################################################################################################################################
+Our_tpm
+GSE67835_tpm
+GSE85908_tpm
+
+common_genes_all <- intersect(intersect(rownames(Our_tpm), rownames(GSE67835_tpm)), 
+                              rownames(GSE85908_tpm))
+
+length(common_genes_all)
+
+combined_tpm <- cbind(Our_tpm[common_genes_all, ],
+                      GSE67835_tpm[common_genes_all, ],
+                      GSE85908_tpm[common_genes_all, ])
+
+ncol(combined_tpm)
+print(dim(combined_tpm))
+print(combined_tpm[1:5, 1:5])
+
+
+Our_info <- data.frame(sample_id = colnames(Our_tpm),group = "Our_NPC")
+
+GSE85908_info <- read.csv(file = "GSE85908/GSE85908_metadata.csv")
+GSE85908_info <- GSE85908_info %>% dplyr::rename(group = phenotype)
+GSE67835_info <- read.csv(file = "GSE67835/GSE67835_merged_metadata.csv")
+GSE67835_info <- GSE67835_info %>%
+  dplyr::select(sample_id = X, group = cell.type.ch1)
+
+combined_info <- rbind(Our_info, GSE67835_info, GSE85908_info)
+combined_info <- combined_info[match(colnames(combined_tpm), combined_info$sample_id), ]
+
+all(colnames(combined_tpm) == combined_info$sample_id)
+
+
+combined_info <- combined_info %>%
+  mutate(study = case_when(
+    sample_id %in% colnames(Our_tpm) ~ "Our",
+    sample_id %in% colnames(GSE67835_tpm) ~ "GSE67835",
+    sample_id %in% colnames(GSE85908_tpm) ~ "GSE85908"
+  ))
+
+
+study_colors <- as.factor(combined_info$study)
+
+par(mar=c(7, 4, 4, 2))
+png(filename = "figure/All_gene_TPM.png",  width = 1800, height = 500, res = 120)
+boxplot(log2(combined_tpm + 1), 
+        outline = FALSE, 
+        main = "Log2 TPM Distribution by Study", 
+        col = c("royalblue", "orange", "forestgreen")[study_colors],
+        names = FALSE,
+        ylab = "Log2(TPM + 1)",
+        xlab = paste0("Total Samples (n = ", ncol(combined_tpm), ")"))
+legend("topright", legend = levels(study_colors), 
+       fill = c("royalblue", "orange", "forestgreen"), cex = 0.8)
+dev.off()
+
+
+####################################################################################################################################
+################################################## low detected genes filtering ####################################################
+sample_lib_size <- colSums(combined_tpm)
+sample_detected_genes <- colSums(combined_tpm > 0)
+
+sample_qc <- data.frame(
+  sample_id = names(sample_lib_size),
+  lib_size = sample_lib_size,
+  detected_genes = sample_detected_genes,
+  study = combined_info$study,
+  group = combined_info$group,
+  stringsAsFactors = FALSE)
+
+keep_sample_ids <- sample_qc %>%
+  filter(detected_genes >= 4500) %>%
+  pull(sample_id)
+
+
+removed_count <- nrow(sample_qc) - length(keep_sample_ids)
+
+
+combined_tpm_filtered <- combined_tpm[, keep_sample_ids]
+combined_info_filtered <- combined_info %>% filter(sample_id %in% keep_sample_ids)
+
+
+study_colors_filtered <- as.factor(combined_info_filtered$study)
+
+
+par(mar=c(7, 4, 4, 2))
+
+png(filename = "figure/Filtered_TPM_Distribution_4500.png", width = 1800, height = 500, res = 120)
+boxplot(log2(combined_tpm_filtered + 1), 
+        outline = FALSE, 
+        main = "Log2 TPM Distribution (Detected Genes >= 4,500)", 
+        col = c("royalblue", "orange", "forestgreen")[study_colors_filtered],
+        names = FALSE,
+        ylab = "Log2(TPM + 1)",
+        xlab = paste0("Filtered Samples (n = ", ncol(combined_tpm_filtered), ")"))
+legend("topright", 
+       legend = levels(study_colors_filtered), 
+       fill = c("royalblue", "orange", "forestgreen"), 
+       cex = 0.8)
+
+dev.off()
+
+
+combined_tpm_filtered
+ncol(combined_tpm_filtered)
+
+group_counts <- table(combined_info_filtered$group)
+
+print(group_counts)
+
+study_group_table <- table(combined_info_filtered$study, combined_info_filtered$group)
+print(study_group_table)
+
+group_summary <- combined_info_filtered %>%
+  group_by(study, group) %>%
+  summarise(n_samples = n(), .groups = 'drop')
+
+print(group_summary)
+
+############################################################################################################################
+############################################################################################################################
+
+
+a <- c("L1TD1","TDGF1", "LINC00678", "AC009446.1", "ESRG", "DNMT3B", "LIN28A", "DPPA4", "LNCPRESS2", "IFITM1", "AL353747.4", 
+      "AC064802.1", "S100A11", "AC104257.1", "LECT1", "CCNB1", "CKS2", "MCM3", "SLC7A3", "BIRC5", "ABRACL", "MT1G", 
+      "CKS1B", "RPS4Y1", "AL591030.1")
+
+b <- c("TMSB15A", "VIM", "CCDC167", "GNG5", "LINC01158", "SPARC", "NUSAP1", "MDK", "RPL21P119", "TMSB10", "GSTP1", "CLIC1", 
+         "TMEM97", "TOP2A", "OSTC", "RPLP0", "KPNA2", "PHPT1", "HMGN2P5", "ROMO1", "PTTG1", "HMGN2", "TFAP2C", "POU3F3", "SYNE2")
+
+c <- c("TNC","EOMES", "HNRNPH1", "LINC01965", "INSM1", "AC010332.2", "DMRTA2", "RNA5SP92", "RF00019", "ASNSP3", "AF186190.1")
+
+d <- c("STMN2", "DCX", "NEUROD6", "SOX11", "SOX4", "BCL11A", "NNAT", "CD24", "SATB2", "TUBA1A", "MLLT11", "SLA", "ZBTB18", "FOXG1", 
+       "MAP1B", "TUBB", "NFIB", "DPYSL3", "NREP", "CXADR", "RTN1", "SYT4", "MLLT3", "NELL2", "CRISPLD2")
+
+e <- c("SNAP25", "SCG2", "SYNPR", "MEG3", "GABRA1", "CCK", "TSPAN7", "VSNL1", "ATP1B1", "SCG5", "GAD1", "NAP1L3", "GABRG2", "SYT1", 
+       "SERPINI1", "GABRB2", "AC124303.2", "VIP", "LINC00632", "FGF12", "PEG3", "SCN2A", "PNMA2", "NRIP3")
+
+f <- c("KLF4", "TIMP3", "APOLD1", "IFITM3", "B2M", "LGALS1", "ZFP36", "NFKBIA", "NEAT1", "ITM2A", "TACC1", "HLA-E", "MSX1", "FOSB", 
+       "CEBPD", "SERTAD1", "TM4SF1", "KLF6", "DCN", "VAMP5", "ANXA1")
+
+#gene_groups <- list(Group_A = a,Group_B = b,Group_C = c,Group_D = d,Group_E = e,Group_F = f)
+
+gene_groups <- list(Group_A = a,Group_B = b,Group_C = c,Group_D = e)
+
+gene_anno_df <- stack(gene_groups)
+colnames(gene_anno_df) <- c("gene", "group")
+gene_anno_df <- gene_anno_df %>% filter(gene %in% rownames(combined_tpm_filtered))
+
+group_means <- combined_tpm_filtered[gene_anno_df$gene, ] %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(group = combined_info_filtered$group) %>%
+  group_by(group) %>%
+  summarise(across(everything(), mean)) %>%
+  column_to_rownames("group") %>%
+  t()
+
+
+group_z <- t(apply(group_means, 1, scale))
+colnames(group_z) <- colnames(group_means)
+rownames(group_z) <- rownames(group_means)
+
+row_anno <- gene_anno_df %>% column_to_rownames("gene")
+
+plot_data <- t(group_z) 
+
+
+col_anno <- row_anno 
+
+
+pheatmap(plot_data, 
+         annotation_col = col_anno,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         main = "Marker Analysis",
+         color = colorRampPalette(c("navy", "white", "firebrick3"))(100),
+         border_color = "white",
+         fontsize_col = 7,
+         gaps_col = cumsum(table(factor(gene_anno_df$group, levels = names(gene_groups)))),
+         cellwidth = 10, cellheight = 20)
+
+
+
+exclude_groups <- c("MN", "hybrid", "endothelial", "fetal_quiescent", "fetal_replicating", "oligodendrocytes")
+
+ncol(combined_tpm_filtered)
+group_means_filtered <- combined_tpm_filtered[gene_anno_df$gene, ] %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(group = combined_info_filtered$group) %>%
+  filter(!group %in% exclude_groups) %>% 
+  group_by(group) %>%
+  summarise(across(everything(), mean)) %>%
+  column_to_rownames("group") %>%
+  t()
+
+
+group_z_filtered <- t(apply(group_means_filtered, 1, scale))
+colnames(group_z_filtered) <- colnames(group_means_filtered)
+rownames(group_z_filtered) <- rownames(group_means_filtered)
+
+
+plot_data <- t(group_z_filtered)
+
+all_rows <- rownames(plot_data)
+
+other_rows <- setdiff(all_rows, "Our_NPC")
+
+new_order <- c("Our_NPC", other_rows)
+
+plot_data_ordered <- plot_data[new_order, ]
+
+
+png(filename = "figure/Non_quantile_4500.png", width = 3000, height = 700, res = 150)
+pheatmap(plot_data_ordered, 
+         annotation_col = col_anno,
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE,
+         main = "Marker Analysis",
+         color = colorRampPalette(c("navy", "white", "firebrick3"))(100),
+         border_color = "white",
+         gaps_row = 1.9,
+         fontsize_col = 7.5,
+         angle_col = "45",
+         gaps_col = cumsum(table(factor(gene_anno_df$group, levels = names(gene_groups)))),
+         cellwidth = 10, cellheight = 20)
+dev.off()
+
+#####################################################################################################################
+library(preprocessCore)
+ncol(combined_tpm_filtered)
+qn_matrix <- normalize.quantiles(as.matrix(combined_tpm_filtered))
+ncol(combined_tpm_filtered)
+
+rownames(qn_matrix) <- rownames(combined_tpm_filtered)
+colnames(qn_matrix) <- colnames(combined_tpm_filtered)
+
+
+group_means_qn <- qn_matrix[gene_anno_df$gene, ] %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(group = combined_info_filtered$group) %>%
+  filter(!group %in% exclude_groups) %>% 
+  group_by(group) %>%
+  summarise(across(everything(), mean)) %>%
+  column_to_rownames("group") %>%
+  t()
+
+
+group_z_qn <- t(apply(group_means_qn, 1, scale))
+colnames(group_z_qn) <- colnames(group_means_qn)
+rownames(group_z_qn) <- rownames(group_means_qn)
+
+
+plot_data_qn <- t(group_z_qn)
+target_order <- c("Our_NPC", "NPC", "iPSC", "astrocytes", "neurons")
+
+
+other_groups <- setdiff(rownames(plot_data_qn), target_order)
+new_order_qn <- c(target_order, other_groups)
+
+final_order <- new_order_qn[new_order_qn %in% rownames(plot_data_qn)]
+plot_data_ordered_qn <- plot_data_qn[final_order, ]
+plot_data_ordered_qn <- plot_data_qn[new_order_qn, ]
+
+png(filename = "figure/quantile_4500_v2.png", width = 2000, height = 700, res = 120)
+pheatmap(plot_data_ordered_qn, 
+         annotation_col = col_anno,
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE,
+         main = "Marker Analysis (Quantile Normalized)",
+         color = colorRampPalette(c("navy", "white", "firebrick3"))(100),
+         border_color = "white",
+         gaps_row = 1,
+         fontsize_col = 7.5,
+         angle_col = "45",
+         gaps_col = cumsum(table(factor(gene_anno_df$group, levels = names(gene_groups)))),
+         cellwidth = 10, cellheight = 20)
+dev.off()
+
+combined_info_filtered %>% 
+  filter(!group %in% exclude_groups) %>% 
+  nrow()
+
+############################################################################################################################
+data_before <- log2(combined_tpm_filtered + 1)
+data_after  <- log2(qn_matrix + 1)
+
+
+png(filename = "figure/QN_Comparison_Check_3500.png", width = 2000, height = 1000, res = 120)
+par(mfrow = c(1, 2))
+
+boxplot(data_before, 
+        outline = FALSE, 
+        main = "Before Quantile Norm (Raw TPM Distribution)",
+        col = c("royalblue", "orange", "forestgreen")[study_colors_filtered],
+        names = FALSE, ylab = "Log2(TPM + 1)")
+legend("topright", legend = levels(study_colors_filtered), 
+       fill = c("royalblue", "orange", "forestgreen"), cex = 0.8)
+boxplot(data_after, 
+        outline = FALSE, 
+        main = "After Quantile Norm (Equalized Distribution)",
+        col = c("royalblue", "orange", "forestgreen")[study_colors_filtered],
+        names = FALSE, ylab = "Log2(TPM + 1)")
+legend("topright", legend = levels(study_colors_filtered), 
+       fill = c("royalblue", "orange", "forestgreen"), cex = 0.8)
+dev.off()
